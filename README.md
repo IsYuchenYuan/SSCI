@@ -40,7 +40,7 @@ First, do the preprocessing for the MMWHS dataset by runing:
 python cardiac_processing.py
 ```
 
-#### model training
+#### Model training
 Then, train the model by using the MMWHS dataset
 ```
 python train_MMWHS.py
@@ -49,8 +49,8 @@ Train the model by using the ACDC dataset
 ```
 python train_ACDC.py
 ```
-#### model inference
-Test the trained model on the evaluation set, for the MMWHS dataset
+#### Model inference
+Test te trained model on the evaluation set, for the MMWHS dataset
 ```
 python test_MMWHS.py
 ```
