@@ -149,10 +149,31 @@ def cut_mix(unlabeled_image=None, unlabeled_mask=None):
     return mix_unlabeled_image, mix_unlabeled_target
 
 
-with open('../data/ACDC/' + 'train.txt', 'r') as f:
-    lists = f.readlines()
-image_list = lists[80:]
-image_list = [item.replace('\n', '') for item in image_list]
+def validation(net, testloader):
+    val_dice_loss = 0.0
+    with torch.no_grad():
+        for i, sampled_batch in enumerate(testloader):
+            image_batch, label_batch = sampled_batch['image'], sampled_batch['label']
+            image_batch = image_batch.cuda()
+            label_batch = label_batch.cuda()
+
+            outputs = net(x_2d=image_batch,
+                          label=label_batch,
+                          use_prototype=False)
+            # cls_seg = outputs["cls_seg"]  # b,c,h,w
+            cls_seg = outputs["proto_seg"]  # b,c,h,w
+            loss_ce = criterion(cls_seg, label_batch)
+            if args.multiDSC:
+                outputs_soft = F.softmax(cls_seg, dim=1)
+                loss_dice = dice_loss(outputs_soft, label_batch)
+            else:
+                loss_dice = losses.dice_loss_foreground(cls_seg,label_batch)
+            loss_cls_2d = args.ce_w * loss_ce + args.dice_w * loss_dice
+            loss_cls = loss_cls_2d
+            val_dice_loss = loss_cls.item()
+
+    val_dice_loss /= (i + 1)
+    return val_dice_loss
 
 
 if __name__ == "__main__":
@@ -379,17 +400,16 @@ if __name__ == "__main__":
 
             if iter_num >= 2000 and iter_num % 200 == 0:
                 s_model.eval()
-                testing_dice,_ = test_eval(net=s_model, image_list=image_list,log=False)
-                logging.info('iter %d : testing_dice : %f ' %
-                             (iter_num, testing_dice))
-                if bestdice < testing_dice:
+                testing_dice_loss = validation(net=s_model, testloader=testloader)
+                logging.info('iter %d : testing_dice_loss : %f ' %
+                             (iter_num, testing_dice_loss))
+                if bestloss > testing_dice_loss:
                     bestIter = iter_num
-                    save_mode_path = os.path.join(snapshot_path, 'iter_' + str(iter_num) +
-                                                  '_dice_' + str(testing_dice) + '.pth')
+                    save_mode_path = os.path.join(snapshot_path, 'iter_' + str(iter_num) + '.pth')
                     torch.save(s_model.state_dict(), save_mode_path)
 
                     logging.info("currently best!!!! save Ourmodel to {}".format(save_mode_path))
-                    bestdice = testing_dice
+                    bestloss = testing_dice_loss
                 s_model.train()
 
             if iter_num >= max_iterations:
