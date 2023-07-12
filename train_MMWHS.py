@@ -29,9 +29,9 @@ import torch.backends.cudnn as cudnn
 import cv2
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--root_path', type=str, default='', help='data path')
-parser.add_argument('--exp', type=str, default='', help='model name')
-parser.add_argument('--percentage', type=float, default='', help='labeled percentage [0.1,0.2,0.4]')
+parser.add_argument('--root_path', type=str, default='../data', help='data path')
+parser.add_argument('--exp', type=str, default='test', help='model name')
+parser.add_argument('--percentage', type=float, default='0.4', help='labeled percentage [0.1,0.2,0.4]')
 
 parser.add_argument('--max_iterations', type=int, default=16000, help='maximum epoch number to train the whole framework')
 parser.add_argument('--num_classes', type=int, default=8, help='the output classes of model')
@@ -42,7 +42,7 @@ parser.add_argument('--min_lr', type=float, default=1e-6, help='minmum lr the sc
 parser.add_argument('--deterministic', type=int, default=1, help='whether use deterministic training')
 parser.add_argument('--seed', type=int, default=1337, help='random seed')
 parser.add_argument('--gpu', type=str, default='0,1', help='GPU to use')
-parser.add_argument('--patchsize', type=list, default=[256, 256],  help='size of input patch')
+parser.add_argument('--patchsize', type=list, default=(80,80,80),  help='size of input patch')
 ### costs
 parser.add_argument('--ema_decay', type=float, default=0.99, help='ema_decay')
 parser.add_argument('--consistency', type=float, default='0.5', help='loss weight of unlabeled data (you can change to suit the dataset)')
@@ -53,9 +53,6 @@ parser.add_argument("--pretrainIter", type=int, default=6000, help="maximum iter
 parser.add_argument("--linearIter", type=int, default=1000, help="maximum iteration to train the LC")
 parser.add_argument("--dice_w", type=float, default=0.5, help="the weight of dice loss (you can change to suit the dataset)")
 parser.add_argument("--ce_w", type=float, default=0.5, help="the weight of ce loss (you can change to suit the dataset)")
-parser.add_argument("--cls_w", type=float, default=0.25, help="the weight of linear-based classifier loss (you can change to suit the dataset)")
-parser.add_argument("--proto_w", type=float, default=0.5, help="the weight of proto-based classifier loss (you can change to suit the dataset)")
-parser.add_argument("--vol_w", type=float, default=1, help="the weight of 3d volumn loss (you can change to suit the dataset)")
 parser.add_argument('--proto_rampup', type=float, default=40.0, help='proto_rampup')
 parser.add_argument("--losstype", type=str, default="ce_dice", help="the type of ce and dice loss")
 
@@ -88,10 +85,8 @@ device = torch.device("cuda", local_rank)
 ###############loss##########
 criterion = torch.nn.CrossEntropyLoss()
 proto_loss = losses.PixelPrototypeCELoss()
-HD_loss = losses.HausdorffDTLoss()
 criterion.to(device)
 proto_loss.to(device)
-HD_loss.to(device)
 dice_loss = losses.DiceLoss(num_classes)
 mst_layers = MinimumSpanningTree(TreeFilter2D.norm2_distance)
 tree_filter_layers = TreeFilter2D(groups=1, sigma=0.05)
@@ -202,7 +197,7 @@ if __name__ == "__main__":
 
     db_train_l = Cardiac(base_dir=train_data_path,
                        split='train_l',
-                       percentage=0.4,
+                       percentage=args.percentage,
                        transform=transforms.Compose([
                            RandomRotFlip(),
                            RandomCrop(patch_size),
@@ -210,7 +205,7 @@ if __name__ == "__main__":
                        ]))
     db_train_ul = Cardiac(base_dir=train_data_path,
                          split='train_ul',
-                         percentage=0.4,
+                         percentage=args.percentage,
                          transform=transforms.Compose([
                              RandomRotFlip(),
                              RandomCrop(patch_size),
@@ -218,7 +213,7 @@ if __name__ == "__main__":
                          ]))
     db_test = Cardiac(base_dir=train_data_path,
                       split='test',
-                      percentage=0.4,
+                      percentage=args.percentage,
                       transform=transforms.Compose([
                           CenterCrop(patch_size),
                           ToTensor()
@@ -247,17 +242,6 @@ if __name__ == "__main__":
     optimizer = optim.SGD(s_model.parameters(), lr=base_lr, momentum=0.9, weight_decay=0.0001)
     lr_scheduler = PolyLR(optimizer, max_epoch, min_lr=args.min_lr)
 
-
-    if args.consistency_type == 'mse':
-        if num_classes == 1:
-            consistency_criterion = losses.sigmoid_mse_loss
-        else:
-            consistency_criterion = losses.softmax_mse_loss
-    elif args.consistency_type == 'kl':
-        consistency_criterion = losses.softmax_kl_loss
-    else:
-        assert False, args.consistency_type
-
     if dist.get_rank() == 0:
         writer = SummaryWriter(snapshot_path + '/log')
         logging.info("{} itertations per epoch".format(len(l_trainloader)))
@@ -283,10 +267,9 @@ if __name__ == "__main__":
             volume_batch = torch.cat((volume_batch_l, volume_batch_ul), dim=0)
             volume_batch_2d = converToSlice(volume_batch)
 
-
             if iter_num <= args.linearIter:
-                cls_seg, cls_seg_3d = \
-                    s_model.module.warm_up(x_2d=volume_batch_l_2d, x_3d=volume_batch_l)
+                cls_seg, cls_seg_3d = s_model.module.warm_up(x_2d=volume_batch_l_2d,
+                                                             x_3d=volume_batch_l)
 
                 loss_cls_ce = criterion(cls_seg, label_batch_l_2d)
                 outputs_soft = F.softmax(cls_seg, dim=1)
@@ -297,6 +280,11 @@ if __name__ == "__main__":
                 outputs_soft_3d = F.softmax(cls_seg_3d, dim=1)
                 loss_seg_dice_3d = dice_loss(outputs_soft_3d, label_batch_l)
                 loss_cls_3d = 0.5 * (loss_cls_ce_3d + loss_seg_dice_3d)
+
+                loss = 0.5 * loss_cls_2d + loss_cls_3d
+
+                logging.info('iteration %d : avg loss : %f  loss_cls_2d : %f loss_cls_3d : %f '
+                             % (iter_num, loss.item(), loss_cls_2d.item(), loss_cls_3d.item()))
 
             elif iter_num <= args.pretrainIter:
 
@@ -306,97 +294,97 @@ if __name__ == "__main__":
                 loss_cls_ce = criterion(cls_seg, label_batch_l_2d)
                 outputs_soft = F.softmax(cls_seg, dim=1)
                 loss_seg_dice = dice_loss(outputs_soft, label_batch_l_2d)
-                loss_cls_2d = 0.5 * (loss_cls_ce + loss_seg_dice)
+                loss_cls_2d = args.ce_w * loss_cls_ce + args.dice_w * loss_seg_dice
 
                 cls_seg_3d = outputs["cls_seg_3d"]  # B,c,h,w,d
                 loss_cls_ce_3d = criterion(cls_seg_3d, label_batch_l)
                 outputs_soft_3d = F.softmax(cls_seg_3d, dim=1)
                 loss_seg_dice_3d = dice_loss(outputs_soft_3d, label_batch_l)
-                loss_cls_3d = 0.5 * (loss_cls_ce_3d + loss_seg_dice_3d)
+                loss_cls_3d = args.ce_w * loss_cls_ce_3d + args.dice_w * loss_seg_dice_3d
 
                 proto_seg = outputs["proto_seg"]
-                if args.sub_proto_size != 1:
-                    contrast_logits = outputs["contrast_logits"]
-                    contrast_target = outputs["contrast_target"]
-                    loss_proto = proto_loss(proto_seg, contrast_logits, contrast_target, label_batch_l_2d)
-                else:
-                    outputs_soft = F.softmax(proto_seg, dim=1)
-                    loss_seg_dice = dice_loss(outputs_soft, label_batch_l_2d)
-                    loss_proto_ce = criterion(proto_seg, label_batch_l_2d)
-                    loss_proto = (loss_proto_ce + loss_seg_dice) * 0.5
+                outputs_soft = F.softmax(proto_seg, dim=1)
+                loss_seg_dice = dice_loss(outputs_soft, label_batch_l_2d)
+                loss_proto_ce = criterion(proto_seg, label_batch_l_2d)
+                loss_proto = args.ce_w * loss_proto_ce + args.dice_w * loss_seg_dice
 
-            # use the trained protos to refine pseudo labels
-            with torch.no_grad():
-                u_output = t_model(x_2d=volume_batch_ul_2d, x_3d=volume_batch_ul, label=None, use_prototype=False)
+                loss = (loss_cls_2d + loss_proto) * 0.5 + loss_cls_3d
 
-                u_cls_seg = u_output["proto_seg"]
-                low_feats = volume_batch_ul_2d
-                high_feats = u_output["feature"]
-
-                prob = F.softmax(u_cls_seg, dim=1)
-                tree = mst_layers(low_feats)
-                ASl = tree_filter_layers(feature_in=prob, embed_in=low_feats, tree=tree)  # [b, n, h, w]
-
-                # high-level MST
-                if high_feats is not None:
-                    tree = mst_layers(high_feats)
-                    AS = tree_filter_layers(feature_in=ASl, embed_in=high_feats, tree=tree,
-                                            low_tree=False)  # [b, n, h, w]
-
-                refined_label = torch.argmax(AS, dim=1)
-
-                label_batch_2d = torch.cat((label_batch_l_2d, refined_label), dim=0)
-                cls_pseudo_labels_3d = rearrange(
-                    refined_label, "(b d) h w -> b h w d", b=batch_size)
-
-            outputs = s_model(x_2d=volume_batch_2d, x_3d=volume_batch, label=label_batch_2d, use_prototype=True)
+                logging.info('iteration %d : avg loss : %f  loss_cls_2d : %f loss_cls_3d : %f loss_proto : %f '
+                             % (iter_num, loss.item(), loss_cls_2d.item(), loss_cls_3d.item(), loss_proto.item()))
 
 
-            cls_seg = outputs["cls_seg"]  # b,2,h,w
-            loss_cls_ce = criterion(cls_seg[:batch_size*patch_size[2],:], label_batch_l_2d)
-            outputs_soft = F.softmax(cls_seg[:batch_size*patch_size[2],:], dim=1)
-            loss_seg_dice = dice_loss(outputs_soft, label_batch_l_2d)
-            loss_cls_2d = args.ce_w * loss_cls_ce + args.dice_w * loss_seg_dice
+            elif iter_num > args.pretrainIter:
+                with torch.no_grad():
+                    u_output = t_model(x_2d=volume_batch_ul_2d, x_3d=volume_batch_ul, label=None, use_prototype=False)
 
-            proto_seg = outputs["proto_seg"]
-            outputs_soft = F.softmax(proto_seg[:batch_size*patch_size[2],:], dim=1)
-            loss_seg_dice = dice_loss(outputs_soft, label_batch_l_2d)
-            loss_proto_ce = criterion(proto_seg[:batch_size*patch_size[2],:], label_batch_l_2d)
-            loss_proto = args.ce_w * loss_proto_ce + args.dice_w * loss_seg_dice
+                    u_cls_seg = u_output["proto_seg"]
+                    low_feats = volume_batch_ul_2d
+                    high_feats = u_output["feature"]
 
-            cls_seg_3d = outputs["cls_seg_3d"]  # B,2,h,w,d
-            loss_cls_seg_3d = criterion(cls_seg_3d[:batch_size,:], label_batch_l)
-            outputs_soft_3d = F.softmax(cls_seg_3d[:batch_size,:], dim=1)
-            loss_seg_dice_3d = dice_loss(outputs_soft_3d, label_batch_l)
-            loss_cls_3d = args.ce_w  * loss_cls_seg_3d + args.dice_w * loss_seg_dice_3d
+                    prob = F.softmax(u_cls_seg, dim=1)
+                    tree = mst_layers(low_feats)
+                    ASl = tree_filter_layers(feature_in=prob, embed_in=low_feats, tree=tree)  # [b, n, h, w]
+
+                    # high-level MST
+                    if high_feats is not None:
+                        tree = mst_layers(high_feats)
+                        AS = tree_filter_layers(feature_in=ASl, embed_in=high_feats, tree=tree,
+                                                low_tree=False)  # [b, n, h, w]
+
+                    refined_label = torch.argmax(AS, dim=1)
+
+                    label_batch_2d = torch.cat((label_batch_l_2d, refined_label), dim=0)
+                    cls_pseudo_labels_3d = rearrange(
+                        refined_label, "(b d) h w -> b h w d", b=batch_size)
+
+                outputs = s_model(x_2d=volume_batch_2d, x_3d=volume_batch, label=label_batch_2d, use_prototype=True)
 
 
-            loss_l = args.cls_w * loss_cls_2d + args.proto_w  * loss_proto + args.vol_w * loss_cls_3d
+                cls_seg = outputs["cls_seg"]  # b,2,h,w
+                loss_cls_ce = criterion(cls_seg[:batch_size*patch_size[2],:], label_batch_l_2d)
+                outputs_soft = F.softmax(cls_seg[:batch_size*patch_size[2],:], dim=1)
+                loss_seg_dice = dice_loss(outputs_soft, label_batch_l_2d)
+                loss_cls_2d = args.ce_w * loss_cls_ce + args.dice_w * loss_seg_dice
 
-            # unlabel
-            loss_cls_ce = criterion(cls_seg[batch_size * patch_size[2]:,:], refined_label)
-            outputs_soft = F.softmax(cls_seg[batch_size * patch_size[2]:,:], dim=1)
-            loss_seg_dice = dice_loss(outputs_soft, refined_label)
-            loss_cls_2d = args.ce_w * loss_cls_ce + args.dice_w * loss_seg_dice
+                proto_seg = outputs["proto_seg"]
+                outputs_soft = F.softmax(proto_seg[:batch_size*patch_size[2],:], dim=1)
+                loss_seg_dice = dice_loss(outputs_soft, label_batch_l_2d)
+                loss_proto_ce = criterion(proto_seg[:batch_size*patch_size[2],:], label_batch_l_2d)
+                loss_proto = args.ce_w * loss_proto_ce + args.dice_w * loss_seg_dice
 
-            loss_proto_ce = criterion(proto_seg[batch_size * patch_size[2]:,:], refined_label)
-            outputs_soft = F.softmax(proto_seg[batch_size * patch_size[2]:,:], dim=1)
-            loss_seg_dice = dice_loss(outputs_soft, refined_label)
-            loss_proto = args.ce_w * loss_proto_ce + args.dice_w * loss_seg_dice
+                cls_seg_3d = outputs["cls_seg_3d"]  # B,2,h,w,d
+                loss_cls_seg_3d = criterion(cls_seg_3d[:batch_size,:], label_batch_l)
+                outputs_soft_3d = F.softmax(cls_seg_3d[:batch_size,:], dim=1)
+                loss_seg_dice_3d = dice_loss(outputs_soft_3d, label_batch_l)
+                loss_cls_3d = args.ce_w  * loss_cls_seg_3d + args.dice_w * loss_seg_dice_3d
 
-            loss_cls_seg_3d = criterion(cls_seg_3d[batch_size:,:], cls_pseudo_labels_3d)
-            outputs_soft_3d = F.softmax(cls_seg_3d[batch_size:,:], dim=1)
-            loss_seg_dice_3d = dice_loss(outputs_soft_3d, cls_pseudo_labels_3d)
-            loss_cls_3d = args.ce_w  * loss_cls_seg_3d + args.dice_w * loss_seg_dice_3d
+                loss_l = (loss_cls_2d + loss_proto) * 0.5 + loss_cls_3d
 
-            loss_u = args.cls_w * loss_cls_2d + args.proto_w  * loss_proto + args.vol_w * loss_cls_3d
+                # unlabel
+                loss_cls_ce = criterion(cls_seg[batch_size * patch_size[2]:,:], refined_label)
+                outputs_soft = F.softmax(cls_seg[batch_size * patch_size[2]:,:], dim=1)
+                loss_seg_dice = dice_loss(outputs_soft, refined_label)
+                loss_cls_2d = args.ce_w * loss_cls_ce + args.dice_w * loss_seg_dice
 
-            consistency_weight = get_current_consistency_weight(iter_num // 100)
-            loss = loss_l + consistency_weight * loss_u
+                loss_proto_ce = criterion(proto_seg[batch_size * patch_size[2]:,:], refined_label)
+                outputs_soft = F.softmax(proto_seg[batch_size * patch_size[2]:,:], dim=1)
+                loss_seg_dice = dice_loss(outputs_soft, refined_label)
+                loss_proto = args.ce_w * loss_proto_ce + args.dice_w * loss_seg_dice
 
-            logging.info(
-                'iteration %d : loss : %f loss_l : %f loss_u : %f '
-                % (iter_num, loss.item(), loss_l.item(), loss_u.item()))
+                loss_cls_seg_3d = criterion(cls_seg_3d[batch_size:,:], cls_pseudo_labels_3d)
+                outputs_soft_3d = F.softmax(cls_seg_3d[batch_size:,:], dim=1)
+                loss_seg_dice_3d = dice_loss(outputs_soft_3d, cls_pseudo_labels_3d)
+                loss_cls_3d = args.ce_w  * loss_cls_seg_3d + args.dice_w * loss_seg_dice_3d
+
+                loss_u = (loss_cls_2d + loss_proto) * 0.5 + loss_cls_3d
+
+                consistency_weight = get_current_consistency_weight(iter_num // 100)
+                loss = loss_l + consistency_weight * loss_u
+
+                logging.info(
+                    'iteration %d : loss : %f loss_l : %f loss_u : %f '
+                    % (iter_num, loss.item(), loss_l.item(), loss_u.item()))
 
             optimizer.zero_grad()
             loss.backward()
@@ -414,8 +402,8 @@ if __name__ == "__main__":
                         bestIter = iter_num
                         save_mode_path = os.path.join(snapshot_path, 'iter_' + str(iter_num) + '.pth')
                         state = {
-                            's_model': s_model.module.state_dict(),  
-                            't_model': t_model.module.state_dict(), 
+                            's_model': s_model.module.state_dict(),  # 训练好的参数
+                            't_model': t_model.module.state_dict(),  # 训练好的参数
                         }
                         torch.save(state, save_mode_path)
                         logging.info("save Ourmodel to {}".format(save_mode_path))
@@ -425,8 +413,8 @@ if __name__ == "__main__":
                     save_mode_path = os.path.join(snapshot_path, 'iter_' + str(iter_num) + '.pth')
                     # torch.save(s_model.module.state_dict(), save_mode_path)
                     state = {
-                        's_model': s_model.module.state_dict(),  
-                        't_model': t_model.module.state_dict(),  
+                        's_model': s_model.module.state_dict(),  # 训练好的参数
+                        't_model': t_model.module.state_dict(),  # 训练好的参数
                     }
                     torch.save(state, save_mode_path)
                     logging.info("save Ourmodel to {}".format(save_mode_path))
@@ -441,8 +429,8 @@ if __name__ == "__main__":
     if dist.get_rank() == 0:
         save_mode_path = os.path.join(snapshot_path, 'iter_' + str(max_iterations) + '.pth')
         state = {
-            's_model': s_model.module.state_dict(), 
-            't_model': t_model.module.state_dict(),  
+            's_model': s_model.module.state_dict(),  # 训练好的参数
+            't_model': t_model.module.state_dict(),  # 训练好的参数
         }
         torch.save(state, save_mode_path)
         logging.info("save Ourmodel to {}".format(save_mode_path))
