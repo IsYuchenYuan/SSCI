@@ -1,5 +1,6 @@
 # Semi-supervised Class Imbalanced Deep Learning for Cardiac MRI Segmentation (MICCAI 2023)
 ![](figures/model.png)
+
 This repository contains the source code of the paper Semi-supervised Class Imbalanced Deep Learning for Cardiac MRI Segmentation.
 ## Prepare
 #### Datasets
@@ -66,3 +67,12 @@ The implementations of tree filters and prototype learning are borrowed from `Tr
 * ProtoSeg: https://github.com/tfzhou/ProtoSeg
 
 Thanks a lot for their splendid work and code sharing!
+
+## Results
+The qualitative analyses of ablation studies. 
+
+![](figures/results.png)
+
+(a) Original slice; (b) Label;  Prediction results from (c) 3D UNet; (d) 3D UNet + PC + CRS ; (e) H-UNet + LC; (f) H-UNet + LC + CRS; (g) H-UNet + PC; (h) H-UNet + LC + PC; (e) H-UNet + LC + PC + CRS (**ours**)
+
+
