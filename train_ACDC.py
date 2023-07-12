@@ -110,45 +110,6 @@ def update_ema_variables(model, ema_model, alpha, global_step):
         ema_param.data.mul_(alpha).add_(1 - alpha, param.data)
 
 
-def rand_bbox_1(size, lam=None):
-    # past implementation
-    W = size[2]
-    H = size[3]
-    B = size[0]
-    cut_rat = np.sqrt(1. - lam)
-    cut_w = np.int(W * cut_rat)
-    cut_h = np.int(H * cut_rat)
-
-    cx = np.random.randint(size=[B, ], low=int(W / 8), high=W)
-    cy = np.random.randint(size=[B, ], low=int(H / 8), high=H)
-
-    bbx1 = np.clip(cx - cut_w // 2, 0, W)
-    bby1 = np.clip(cy - cut_h // 2, 0, H)
-
-    bbx2 = np.clip(cx + cut_w // 2, 0, W)
-    bby2 = np.clip(cy + cut_h // 2, 0, H)
-
-    return bbx1, bby1, bbx2, bby2
-
-
-def cut_mix(unlabeled_image=None, unlabeled_mask=None):
-    mix_unlabeled_image = unlabeled_image.clone()
-    mix_unlabeled_target = unlabeled_mask.clone()
-    u_rand_index = torch.randperm(unlabeled_image.size()[0])[:unlabeled_image.size()[0]].cuda()
-    u_bbx1, u_bby1, u_bbx2, u_bby2 = rand_bbox_1(unlabeled_image.size(), lam=np.random.beta(4, 4))
-
-    for i in range(0, mix_unlabeled_image.shape[0]):
-        mix_unlabeled_image[i, :, u_bbx1[i]:u_bbx2[i], u_bby1[i]:u_bby2[i]] = \
-            unlabeled_image[u_rand_index[i], :, u_bbx1[i]:u_bbx2[i], u_bby1[i]:u_bby2[i]]
-
-        mix_unlabeled_target[i, u_bbx1[i]:u_bbx2[i], u_bby1[i]:u_bby2[i]] = \
-            unlabeled_mask[u_rand_index[i], u_bbx1[i]:u_bbx2[i], u_bby1[i]:u_bby2[i]]
-
-    del unlabeled_image, unlabeled_mask
-
-    return mix_unlabeled_image, mix_unlabeled_target
-
-
 def validation(net, testloader):
     val_dice_loss = 0.0
     with torch.no_grad():
