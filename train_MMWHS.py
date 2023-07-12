@@ -1,3 +1,4 @@
+
 import os
 import sys
 from tqdm import tqdm
@@ -23,6 +24,7 @@ from utils import ramps,losses
 from utils.util import visulize, converToSlice
 from utils.lib_tree_filter.modules.tree_filter import MinimumSpanningTree
 from utils.lib_tree_filter.modules.tree_filter import TreeFilter2D
+from utils.torch_poly_lr_decay import PolyLR
 import torch.backends.cudnn as cudnn
 import cv2
 
@@ -31,22 +33,23 @@ parser.add_argument('--root_path', type=str, default='', help='data path')
 parser.add_argument('--exp', type=str, default='', help='model name')
 parser.add_argument('--percentage', type=float, default='', help='labeled percentage [0.1,0.2,0.4]')
 
-parser.add_argument('--max_iterations', type=int, default=10000, help='maximum epoch number to train the whole framework')
+parser.add_argument('--max_iterations', type=int, default=16000, help='maximum epoch number to train the whole framework')
 parser.add_argument('--num_classes', type=int, default=8, help='the output classes of model')
 parser.add_argument('--batch_size', type=int, default=1, help='batch_size per gpu')
 parser.add_argument('--labeled_bs', type=int, default=1, help='labeled_batch_size per gpu')
 parser.add_argument('--base_lr', type=float, default=0.01, help='maximum epoch number to train')
+parser.add_argument('--min_lr', type=float, default=1e-6, help='minmum lr the scheduler to reach')
 parser.add_argument('--deterministic', type=int, default=1, help='whether use deterministic training')
 parser.add_argument('--seed', type=int, default=1337, help='random seed')
-parser.add_argument('--gpu', type=str, default='0,1,2,3', help='GPU to use')
+parser.add_argument('--gpu', type=str, default='0,1', help='GPU to use')
 parser.add_argument('--patchsize', type=list, default=[256, 256],  help='size of input patch')
 ### costs
 parser.add_argument('--ema_decay', type=float, default=0.99, help='ema_decay')
 parser.add_argument('--consistency', type=float, default='0.5', help='loss weight of unlabeled data (you can change to suit the dataset)')
-parser.add_argument('--consistency_rampup', type=float, default='', help='consistency_rampup')
+parser.add_argument('--consistency_rampup', type=float, default='100.0', help='consistency_rampup')
 
 parser.add_argument("--sub_proto_size", type=int, default= 2, help="whether to use subcluster")
-parser.add_argument("--pretrainIter", type=int, default=3000, help="maximum iteration to train both classifiers by using labeled data only")
+parser.add_argument("--pretrainIter", type=int, default=6000, help="maximum iteration to train both classifiers by using labeled data only")
 parser.add_argument("--linearIter", type=int, default=1000, help="maximum iteration to train the LC")
 parser.add_argument("--dice_w", type=float, default=0.5, help="the weight of dice loss (you can change to suit the dataset)")
 parser.add_argument("--ce_w", type=float, default=0.5, help="the weight of ce loss (you can change to suit the dataset)")
@@ -199,7 +202,7 @@ if __name__ == "__main__":
 
     db_train_l = Cardiac(base_dir=train_data_path,
                        split='train_l',
-                       percentage=0.2,
+                       percentage=0.4,
                        transform=transforms.Compose([
                            RandomRotFlip(),
                            RandomCrop(patch_size),
@@ -207,7 +210,7 @@ if __name__ == "__main__":
                        ]))
     db_train_ul = Cardiac(base_dir=train_data_path,
                          split='train_ul',
-                         percentage=0.2,
+                         percentage=0.4,
                          transform=transforms.Compose([
                              RandomRotFlip(),
                              RandomCrop(patch_size),
@@ -215,7 +218,7 @@ if __name__ == "__main__":
                          ]))
     db_test = Cardiac(base_dir=train_data_path,
                       split='test',
-                      percentage=0.2,
+                      percentage=0.4,
                       transform=transforms.Compose([
                           CenterCrop(patch_size),
                           ToTensor()
@@ -235,10 +238,14 @@ if __name__ == "__main__":
 
     testloader = DataLoader(db_test, batch_size=batch_size, num_workers=0, pin_memory=True,
                             worker_init_fn=worker_init_fn)
+
+    max_epoch = max_iterations // len(l_trainloader) + 1
+
     s_model.train()
     t_model.train()
-    optimizer = optim.SGD(s_model.parameters(), lr=base_lr, momentum=0.9, weight_decay=0.0001)
 
+    optimizer = optim.SGD(s_model.parameters(), lr=base_lr, momentum=0.9, weight_decay=0.0001)
+    lr_scheduler = PolyLR(optimizer, max_epoch, min_lr=args.min_lr)
 
 
     if args.consistency_type == 'mse':
@@ -262,8 +269,6 @@ if __name__ == "__main__":
         logging.info("\n")
         l_sampler.set_epoch(epoch_num)
         ul_sampler.set_epoch(epoch_num)
-        # maybe_update_lr(epoch_num,optimizer,max_epoch,base_lr)
-        # logging.info("learning rate: %.6f" % optimizer.param_groups[0]['lr'])
 
         for i_batch, (sampled_batch_l,sampled_batch_ul) in enumerate(zip(l_trainloader,ul_trainloader)):
             volume_batch_l, label_batch_l = sampled_batch_l['image'], sampled_batch_l['label']
@@ -272,10 +277,53 @@ if __name__ == "__main__":
             volume_batch_l.to(device), label_batch_l.to(device), volume_batch_ul.to(device),label_batch_ul.to(device)
             # volume_batch_l_2d = converToSlice(volume_batch_l)
             label_batch_l_2d = converToSlice(label_batch_l)
+            volume_batch_l_2d = converToSlice(volume_batch_l)
             volume_batch_ul_2d = converToSlice(volume_batch_ul)
             label_batch_ul_2d = converToSlice(label_batch_ul)
             volume_batch = torch.cat((volume_batch_l, volume_batch_ul), dim=0)
             volume_batch_2d = converToSlice(volume_batch)
+
+
+            if iter_num <= args.linearIter:
+                cls_seg, cls_seg_3d = \
+                    s_model.module.warm_up(x_2d=volume_batch_l_2d, x_3d=volume_batch_l)
+
+                loss_cls_ce = criterion(cls_seg, label_batch_l_2d)
+                outputs_soft = F.softmax(cls_seg, dim=1)
+                loss_seg_dice = dice_loss(outputs_soft, label_batch_l_2d)
+                loss_cls_2d = 0.5 * (loss_cls_ce + loss_seg_dice)
+
+                loss_cls_ce_3d = criterion(cls_seg_3d, label_batch_l)
+                outputs_soft_3d = F.softmax(cls_seg_3d, dim=1)
+                loss_seg_dice_3d = dice_loss(outputs_soft_3d, label_batch_l)
+                loss_cls_3d = 0.5 * (loss_cls_ce_3d + loss_seg_dice_3d)
+
+            elif iter_num <= args.pretrainIter:
+
+                outputs = s_model(x_2d=volume_batch_l_2d, x_3d=volume_batch_l, label=label_batch_l_2d, use_prototype=True)
+
+                cls_seg = outputs["cls_seg"]  # b,c,h,w
+                loss_cls_ce = criterion(cls_seg, label_batch_l_2d)
+                outputs_soft = F.softmax(cls_seg, dim=1)
+                loss_seg_dice = dice_loss(outputs_soft, label_batch_l_2d)
+                loss_cls_2d = 0.5 * (loss_cls_ce + loss_seg_dice)
+
+                cls_seg_3d = outputs["cls_seg_3d"]  # B,c,h,w,d
+                loss_cls_ce_3d = criterion(cls_seg_3d, label_batch_l)
+                outputs_soft_3d = F.softmax(cls_seg_3d, dim=1)
+                loss_seg_dice_3d = dice_loss(outputs_soft_3d, label_batch_l)
+                loss_cls_3d = 0.5 * (loss_cls_ce_3d + loss_seg_dice_3d)
+
+                proto_seg = outputs["proto_seg"]
+                if args.sub_proto_size != 1:
+                    contrast_logits = outputs["contrast_logits"]
+                    contrast_target = outputs["contrast_target"]
+                    loss_proto = proto_loss(proto_seg, contrast_logits, contrast_target, label_batch_l_2d)
+                else:
+                    outputs_soft = F.softmax(proto_seg, dim=1)
+                    loss_seg_dice = dice_loss(outputs_soft, label_batch_l_2d)
+                    loss_proto_ce = criterion(proto_seg, label_batch_l_2d)
+                    loss_proto = (loss_proto_ce + loss_seg_dice) * 0.5
 
             # use the trained protos to refine pseudo labels
             with torch.no_grad():
@@ -343,7 +391,7 @@ if __name__ == "__main__":
 
             loss_u = args.cls_w * loss_cls_2d + args.proto_w  * loss_proto + args.vol_w * loss_cls_3d
 
-            consistency_weight = get_current_consistency_weight(iter_num // 150)
+            consistency_weight = get_current_consistency_weight(iter_num // 100)
             loss = loss_l + consistency_weight * loss_u
 
             logging.info(
@@ -357,12 +405,6 @@ if __name__ == "__main__":
             update_ema_variables(s_model, t_model, args.ema_decay, iter_num)
             iter_num = iter_num + 1
 
-            # change lr
-            if iter_num % 2500 == 0:
-                lr_ = base_lr * 0.1 ** (iter_num // 2500)
-                for param_group in optimizer.param_groups:
-                    param_group['lr'] = lr_
-
             if dist.get_rank() == 0:
                 if iter_num >= 1000 and iter_num % 50 == 0:
                     testing_dice_loss = validation(net=s_model, testloader=testloader)
@@ -372,8 +414,8 @@ if __name__ == "__main__":
                         bestIter = iter_num
                         save_mode_path = os.path.join(snapshot_path, 'iter_' + str(iter_num) + '.pth')
                         state = {
-                            's_model': s_model.module.state_dict(),  # 训练好的参数
-                            't_model': t_model.module.state_dict(),  # 训练好的参数
+                            's_model': s_model.module.state_dict(),  
+                            't_model': t_model.module.state_dict(), 
                         }
                         torch.save(state, save_mode_path)
                         logging.info("save Ourmodel to {}".format(save_mode_path))
@@ -383,8 +425,8 @@ if __name__ == "__main__":
                     save_mode_path = os.path.join(snapshot_path, 'iter_' + str(iter_num) + '.pth')
                     # torch.save(s_model.module.state_dict(), save_mode_path)
                     state = {
-                        's_model': s_model.module.state_dict(),  # 训练好的参数
-                        't_model': t_model.module.state_dict(),  # 训练好的参数
+                        's_model': s_model.module.state_dict(),  
+                        't_model': t_model.module.state_dict(),  
                     }
                     torch.save(state, save_mode_path)
                     logging.info("save Ourmodel to {}".format(save_mode_path))
@@ -392,14 +434,15 @@ if __name__ == "__main__":
             if iter_num >= max_iterations:
                 break
             time1 = time.time()
+        lr_scheduler.step()
         if iter_num >= max_iterations:
             break
 
     if dist.get_rank() == 0:
         save_mode_path = os.path.join(snapshot_path, 'iter_' + str(max_iterations) + '.pth')
         state = {
-            's_model': s_model.module.state_dict(),  # 训练好的参数
-            't_model': t_model.module.state_dict(),  # 训练好的参数
+            's_model': s_model.module.state_dict(), 
+            't_model': t_model.module.state_dict(),  
         }
         torch.save(state, save_mode_path)
         logging.info("save Ourmodel to {}".format(save_mode_path))
