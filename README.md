@@ -75,4 +75,5 @@ The qualitative analyses of ablation studies.
 
 (a) Original slice; (b) Label;  Prediction results from (c) 3D UNet; (d) 3D UNet + PC + CRS ; (e) H-UNet + LC; (f) H-UNet + LC + CRS; (g) H-UNet + PC; (h) H-UNet + LC + PC; (e) H-UNet + LC + PC + CRS (**ours**)
 
-
+## Contact
+If you have any questions or comments, please feel free to cantact me via [ycyuan22@cse.cuhk.edu.hk](ycyuan22@cse.cuhk.edu.hk)
