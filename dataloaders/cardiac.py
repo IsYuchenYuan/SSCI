@@ -26,7 +26,7 @@ class Cardiac(Dataset):
         trainlists = lists[:-4]
         random.seed(2)  # 1
         random.shuffle(trainlists)
-        label_num = int(len(trainlists) * percentage)
+        label_num = math.ceil(len(trainlists) * percentage)
         if split=='train_l':
             self.image_list = trainlists[:label_num]
         elif split=='train_ul':
