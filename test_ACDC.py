@@ -1,8 +1,9 @@
+
+
 import os
 import argparse
 from networks.unet_proto import UNetProto
 import torch
-import torch.nn.functional as F
 import numpy as np
 import medpy.metric.binary as mmb
 import nibabel as nib
@@ -152,53 +153,33 @@ def test_eval(net,image_list,save_result=False,do_postprocessing=True,log=True,c
             ed = data_dir + patient + '/' + patient + '_frame' + str(
                 info[phase]).zfill(2)
             img_dat = load_nii(ed + '.nii.gz')
-            pixel_size = (img_dat[2].structarr['pixdim'][1], img_dat[2].structarr['pixdim'][2])
             ed_img = img_dat[0]
             ed_gt = nib.load(ed + '_gt.nii.gz').get_fdata()
             if crop:
                 ed_img, ed_gt = crop_ROI(ed_img, ed_gt)
             ed_img = (ed_img - np.mean(ed_img)) / np.std(ed_img)
 
-            ####  resample ##########
-            scale_vector = (pixel_size[0] / 1,
-                            pixel_size[1] / 1)
-
-            tmp_pred = np.zeros([ed_gt.shape[0], ed_gt.shape[1],ed_gt.shape[2]])
-
-            for ii in range(int(np.floor(ed_img.shape[2] // batch_size))):
-                vol = np.zeros([batch_size, 1, pathsize, pathsize])
-                for idx, jj in enumerate(range(ii * batch_size, (ii + 1) * batch_size)):
-                    image = ed_img[..., jj] # HxW
-                    image = transform.rescale(image,
-                                                   scale_vector,
-                                                   order=1,
-                                                   preserve_range=True,
-                                                   anti_aliasing=True,
-                                                   mode='constant')
-                    x, y = image.shape
-                    image = CropAndPad(image, x, y, pathsize, pathsize,np.min(image))
-                    vol[idx, ...] = image[np.newaxis,...].copy()
-                vol = torch.from_numpy(vol).float().cuda()
-                outputs = net(x_2d=vol,
-                              label=None,
-                              use_prototype=False)
-                pred = outputs["proto_seg"]  # b,c,h,w
-                if isinstance(pred,tuple):
-                    pred = pred[1]
-                pred = F.softmax(pred, dim=1)
-                pred = pred.detach().cpu().numpy()
-                pred = pred[0]
-                newpred = np.zeros((pred.shape[0],ed_gt.shape[0], ed_gt.shape[1]))
-                for i in range(pred.shape[0]):
-                    slicepred = back_CropAndPad(x, y, pathsize, pathsize, pred[i])
-                    newpred[i]= transform.resize(slicepred,
-                                            (ed_gt.shape[0], ed_gt.shape[1]),
-                                            order=1,
-                                            preserve_range=True,
-                                            mode='constant')
-                pred = np.argmax(newpred[np.newaxis,...],axis=1)
-                for idx, jj in enumerate(range(ii * batch_size, (ii + 1) * batch_size)):
-                    tmp_pred[..., jj] = pred[idx, ...].copy()
+            ####  zoom ##########
+            tmp_pred = np.zeros_like(ed_gt)
+            for ind in range(ed_img.shape[-1]):
+                slice = ed_img[:, :, ind]
+                x, y = slice.shape[0], slice.shape[1]
+                slice = zoom(slice, (256 / x, 256 / y), order=0)
+                input = torch.from_numpy(slice).unsqueeze(0).unsqueeze(0).float().cuda()
+                with torch.no_grad():
+                    if FLAGS.our:
+                        outputs = net(x_2d=input,
+                                              label=None,
+                                              use_prototype=False)
+                        out_main = outputs["cls_seg"]  # b,c,h,w
+                    else:
+                        out_main = net(input)
+                        if isinstance(pred,tuple):
+                            out_main = out_main[1]
+                    out = torch.argmax(torch.softmax(out_main, dim=1), dim=1).squeeze(0)
+                    out = out.cpu().detach().numpy()
+                    pred = zoom(out, (x / 256, y / 256), order=0)
+                    tmp_pred[:,:,ind] = pred
 
             if do_postprocessing:
                 tmp_pred = keep_largest_connected_components(tmp_pred)
@@ -266,4 +247,3 @@ if __name__ == '__main__':
     print("init weight from {}".format(save_mode_path))
     net.eval()
     test_eval(net,image_list=image_list)
-
